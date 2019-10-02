@@ -1,5 +1,5 @@
 {
-    "name": "Amakata/m2-ce-cron",
+    "name": "amakata/m2-ce-cron",
     "description": "Replacement package for Magento 2 Cron Functionality",
     "type": "magento2-module",
     "keywords": ["magento2","cron"],
@@ -8,7 +8,7 @@
      "authors": [
             {
                 "name": "MageMojo",
-                "homepage": "https://github.com/Amakata/m2-ce-cron"
+                "homepage": "https://github.com/amakata/m2-ce-cron"
             }
         ],
     "require": {
