@@ -34,4 +34,3 @@ Before review, keep in mind that:
 
 Once comments and revisions on the implementation wind down, the reviewers will
 add the LGTM label which marks the PR as merge-able.
-
