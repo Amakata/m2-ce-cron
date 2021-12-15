@@ -10,6 +10,12 @@ class Reports extends \Magento\Framework\View\Element\Template
     private $_cronconfig;
     protected $resourceconfig;
 
+    /**
+     * @param \Magento\Framework\View\Element\Template\Context $context
+     * @param \Magento\Framework\App\ResourceConnection $resource
+     * @param \MageMojo\Cron\Model\ResourceModel\Schedule $resourceconfig
+     * @param array $data
+     */
     public function __construct(
         \Magento\Framework\View\Element\Template\Context $context,
         \Magento\Framework\App\ResourceConnection $resource,
@@ -50,7 +56,7 @@ class Reports extends \Magento\Framework\View\Element\Template
      */
     public function getLocalTimezone()
     {
-        return $this->resourceconfig->getConfigValue('general/locale/timezone', 'default', 0);
+        return $this->_localeDate->getConfigTimezone();
     }
 
 }
