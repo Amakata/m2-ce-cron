@@ -8,7 +8,7 @@
      "authors": [
             {
                 "name": "MageMojo",
-                "homepage": "https://github.com/magemojo/"
+                "homepage": "https://github.com/amakata/m2-ce-cron"
             }
         ],
     "require": {

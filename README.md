@@ -23,6 +23,8 @@ In version 1.3 fixes are implemented for the consumers_runner cron job. This job
 
 In version 1.3.7 the consumers governor was added to terminate idle consumers jobs. Bugs in these jobs otherwise prevent these jobs from completing.
 
+In version 1.3.8.1 fixed: wrong store code for cronjob.
+
 ## Contributing
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -66,11 +68,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - For Magento Versions 2.3 and up
 ```bash
-composer require magemojo/m2-ce-cron
+composer require amakata/m2-ce-cron
 ```
 - Otherwise
 ```bash
-composer require magemojo/m2-ce-cron:1.2.9
+composer require magemojo/m2-ce-cron:1.3.8.1
 ```
 
 - Then run the following

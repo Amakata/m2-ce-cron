@@ -51,6 +51,7 @@ Execution times are in: <?= $timezone ?>
   }
   //print_r($jobs);
   foreach ($jobs as $job_code=>$job) {
+    $runtime = '';
     if ($job["executed_at"] == 'N/A') {
       $executed = $job["executed_at"];
       $runtime = '';
