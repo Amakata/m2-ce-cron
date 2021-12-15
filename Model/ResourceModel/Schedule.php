@@ -1,13 +1,16 @@
 <?php
 namespace MageMojo\Cron\Model\ResourceModel;
 
-class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
-{
-    public function _construct()
-    {
-        $this->_init('cron_schedule', 'schedule_id');
-    }
+use function time;
+use function date;
 
+/**
+ * Class Schedule
+ *
+ * @package MageMojo\Cron\Model\ResourceModel
+ */
+class Schedule extends \Magento\Cron\Model\ResourceModel\Schedule
+{
     /**
      * Get a value from core_config_data
      *
@@ -73,14 +76,19 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
       $connection = $this->getConnection();
       $insertdata = array();
       foreach ($schedule as $time) {
-        array_push($insertdata,array('job_code' => $job["name"], 'status' => 'pending', 'created_at' => date('Y-m-d H:i:s',$created), 'scheduled_at' => date('Y-m-d H:i:s',$time)));
+          $insertdata[] = [
+              'job_code' => $job["name"],
+              'status' => \Magento\Cron\Model\Schedule::STATUS_PENDING,
+              'created_at' => date('Y-m-d H:i:s', $created),
+              'scheduled_at' => date('Y-m-d H:i:s', $time),
+          ];
       }
       $connection->insertMultiple($this->getTable('cron_schedule'), $insertdata);
 
       $select = $connection->select()
           ->from($this->getTable('cron_schedule'))
           ->where('job_code = ?', $job["name"])
-          ->where('status = ?', 'pending')
+          ->where('status = ?', \Magento\Cron\Model\Schedule::STATUS_PENDING)
           ->where('created_at = ?', date('Y-m-d H:i:s',$created));
       $result = $connection->fetchAll($select);
       return $result;
@@ -95,12 +103,14 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
       $connection = $this->getConnection();
       $updatedata = array('status' => $status);
       $updatedata["messages"] = $output;
-      if ($status == 'success') {
-        $updatedata["finished_at"] = date('Y-m-d H:i:s',time());
-      }
-      if ($status == 'running') {
-        $updatedata["executed_at"] = date('Y-m-d H:i:s',time());
-      }
+        switch ($status) {
+            case \Magento\Cron\Model\Schedule::STATUS_SUCCESS:
+                $updatedata['finished_at'] = date('Y-m-d H:i:s', time());
+                break;
+            case \Magento\Cron\Model\Schedule::STATUS_RUNNING:
+                $updatedata['executed_at'] = date('Y-m-d H:i:s', time());
+                break;
+        }
       $connection->update($this->getTable('cron_schedule'),$updatedata,['schedule_id = ?' => $scheduleid]);
     }
 
@@ -118,7 +128,7 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
                 'count(*) as job_count',
                 'min(scheduled_at) as scheduled_at'
             ])
-            ->where('status = ?', 'pending')
+            ->where('status = ?', \Magento\Cron\Model\Schedule::STATUS_PENDING)
             ->where('scheduled_at < ?', date('Y-m-d H:i:s',time()))
             ->group('job_code')
             ->order(new \Zend_Db_Expr("scheduled_at ASC"));
@@ -135,7 +145,7 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
       $connection = $this->getConnection();
       $select = $connection->select()
             ->from($this->getTable('cron_schedule'),['schedule_id','job_code','scheduled_at'])
-            ->where('status = ?', 'pending')
+            ->where('status = ?', \Magento\Cron\Model\Schedule::STATUS_PENDING)
             ->order('job_code')
             ->order('scheduled_at', 'desc');
       $result = $connection->fetchAll($select);
@@ -153,7 +163,13 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
      */
     public function setMissedJobs($jobcode) {
       $connection = $this->getConnection();
-      $connection->update($this->getTable('cron_schedule'),['status' => 'missed'],['job_code = ?' => $jobcode, 'status = ?' => 'pending', 'scheduled_at < ?' => date('Y-m-d H:i:s',time())]);
+        $connection->update($this->getTable('cron_schedule'), [
+            'status' => \Magento\Cron\Model\Schedule::STATUS_MISSED,
+        ], [
+            'job_code = ?' => $jobcode,
+            'status = ?' => \Magento\Cron\Model\Schedule::STATUS_PENDING,
+            'scheduled_at < ?' => date('Y-m-d H:i:s', time()),
+        ]);
     }
 
     /**
@@ -193,8 +209,18 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
     public function resetSchedule() {
       $connection = $this->getConnection();
       $message = 'Parent Cron Process Terminated Abnormally';
-      $connection->update($this->getTable('cron_schedule'),['status' => 'error', 'messages' => $message],['status = ?' => 'running']);
-      $connection->update($this->getTable('cron_schedule'),['status' => 'missed'],['status = ?' => 'pending', 'scheduled_at < ?' => date('Y-m-d H:i:s',time())]);
+        $connection->update($this->getTable('cron_schedule'), [
+            'status' => \Magento\Cron\Model\Schedule::STATUS_ERROR,
+            'messages' => $message,
+        ], [
+            'status = ?' => \Magento\Cron\Model\Schedule::STATUS_RUNNING,
+        ]);
+        $connection->update($this->getTable('cron_schedule'), [
+            'status' => \Magento\Cron\Model\Schedule::STATUS_MISSED,
+        ], [
+            'status = ?' => \Magento\Cron\Model\Schedule::STATUS_PENDING,
+            'scheduled_at < ?' => date('Y-m-d H:i:s', time()),
+        ]);
     }
 
     /**
@@ -253,7 +279,7 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
       );
       $select = $connection->select()
         ->from($this->getTable('cron_schedule'),$columns)
-        ->where('status = ?', 'error')
+        ->where('status = ?', \Magento\Cron\Model\Schedule::STATUS_ERROR)
         ->group('job_code')
         ->order('job_code');
       $result = $connection->fetchAll($select);
