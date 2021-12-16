@@ -115,10 +115,16 @@ class Schedule extends \Magento\Cron\Model\ResourceModel\Schedule
     public function getPendingJobs() {
       $connection = $this->getConnection();
       $select = $connection->select()
-            ->from($this->getTable('cron_schedule'),['max(schedule_id) as schedule_id','job_code','count(*) as job_count'])
+            ->from($this->getTable('cron_schedule'), [
+                'max(schedule_id) as schedule_id',
+                'job_code',
+                'count(*) as job_count',
+                'min(scheduled_at) as scheduled_at'
+            ])
             ->where('status = ?', 'pending')
             ->where('scheduled_at < ?', date('Y-m-d H:i:s',time()))
-            ->group('job_code');
+            ->group('job_code')
+            ->order(new \Zend_Db_Expr("scheduled_at ASC"));
       $result = $connection->fetchAll($select);
       return $result;
     }
