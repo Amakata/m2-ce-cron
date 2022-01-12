@@ -8,9 +8,8 @@ use Symfony\Component\Console\Input\InputOption;
 use Magento\Framework\App\ObjectManagerFactory;
 use Magento\Store\Model\Store;
 use Magento\Store\Model\StoreManager;
-use MageMojo\Cron\Model\Schedule;
 use Magento\Framework\Console\Cli;
-use Magento\Framework\Shell\ComplexParameter;
+use Magento\Cron\Observer\ProcessCronQueueObserver;
 
 /**
  * Command for executing cron jobs
@@ -28,17 +27,15 @@ class CronCommand extends Command
      * @var ObjectManagerFactory
      */
     private $objectManagerFactory;
-    protected $schedule;
 
     /**
      * Constructor
      *
      * @param ObjectManagerFactory $objectManagerFactory
      */
-    public function __construct(ObjectManagerFactory $objectManagerFactory, \MageMojo\Cron\Model\Schedule $schedule)
+    public function __construct(ObjectManagerFactory $objectManagerFactory)
     {
         $this->objectManagerFactory = $objectManagerFactory;
-        $this->schedule = $schedule;
         parent::__construct();
     }
 
@@ -69,9 +66,22 @@ class CronCommand extends Command
 
     /**
      * {@inheritdoc}
+     * @throws \Magento\Framework\Exception\LocalizedException
      */
     protected function execute(InputInterface $input, OutputInterface $output)
     {
-    	$this->schedule->execute();
+        // Force set the scope for
+        $omParams = $_SERVER;
+        $omParams[StoreManager::PARAM_RUN_CODE] = 'admin';
+        $omParams[Store::CUSTOM_ENTRY_POINT_PARAM] = true;
+
+        $objectManager = $this->objectManagerFactory->create($omParams);
+
+        $params[ProcessCronQueueObserver::STANDALONE_PROCESS_STARTED] = '0';
+
+        /** @var \MageMojo\Cron\Model\Schedule $application */
+        $application = $objectManager->create(\MageMojo\Cron\Model\Schedule::class, ['parameters' => $params]);
+
+        $application->launch();
     }
 }

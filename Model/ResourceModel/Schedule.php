@@ -1,13 +1,16 @@
 <?php
 namespace MageMojo\Cron\Model\ResourceModel;
 
-class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
-{
-    public function _construct()
-    {
-        $this->_init('cron_schedule', 'schedule_id');
-    }
+use function time;
+use function date;
 
+/**
+ * Class Schedule
+ *
+ * @package MageMojo\Cron\Model\ResourceModel
+ */
+class Schedule extends \Magento\Cron\Model\ResourceModel\Schedule
+{
     /**
      * Get a value from core_config_data
      *

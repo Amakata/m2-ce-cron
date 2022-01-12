@@ -8,8 +8,14 @@ use Magento\Framework\App\Filesystem\directoryList;
 use Magento\Framework\Exception\FileSystemException;
 use Magento\Framework\MessageQueue\ConnectionTypeResolver;
 use Magento\Framework\MessageQueue\Consumer\Config\ConsumerConfigItemInterface;
+use Magento\Framework\ObjectManager\ConfigLoaderInterface;
 
-class Schedule extends \Magento\Framework\Model\AbstractModel
+/**
+ * Class Schedule
+ *
+ * @package MageMojo\Cron\Model
+ */
+class Schedule extends \Magento\Framework\DataObject implements \Magento\Framework\AppInterface
 {
     const VAR_FOLDER_PATH = BP . '/'. directoryList::VAR_DIR;
     const CRON_FOLDER_PATH = '/cron/schedule';
@@ -28,11 +34,55 @@ class Schedule extends \Magento\Framework\Model\AbstractModel
     private $loadavgtest;
     private $directoryList;
     private $resource;
+
+    /**
+     * @var \Magento\Framework\App\Console\Request
+     */
+    private $request;
+
+    /**
+     * @var \Magento\Framework\App\Console\Response
+     */
+    private $response;
+
     private $maintenance;
+
+    /**
+     * @var \Magento\Framework\App\State
+     */
+    private $state;
+
     private $basedir;
     private $consumerConfig;
     private $deploymentConfig;
+
+    /**
+     * @var \Magento\Framework\Event\ManagerInterface
+     */
+    private $eventManager;
+
     private $mqConnectionTypeResolver;
+
+    /**
+     * @var \Magento\Framework\ObjectManagerInterface
+     */
+    private $objectManager;
+
+    /**
+     * @var \Symfony\Component\Process\PhpExecutableFinder
+     */
+    private $phpExecutableFinder;
+
+    /**
+     * @var \Magento\Store\Model\App\Emulation
+     */
+    private $appEmulation;
+
+    /**
+     * @var \Magento\Framework\App\AreaList|null
+     */
+    private $areaList;
+
     /**
      * @var \Magento\Framework\Filesystem\Driver\File
      */
@@ -40,34 +90,61 @@ class Schedule extends \Magento\Framework\Model\AbstractModel
 
     /**
      * Schedule constructor.
+     *
      * @param \Magento\Cron\Model\Config $cronconfig
      * @param directoryList $directoryList
      * @param ResourceModel\Schedule $resource
+     * @param \Magento\Framework\App\Console\Request $request
+     * @param \Magento\Framework\App\Console\Response $response
      * @param \Magento\Framework\App\MaintenanceMode $maintenance
+     * @param \Magento\Framework\App\State $state
      * @param \Magento\Framework\Filesystem\Driver\File $file
      * @param \Magento\Framework\MessageQueue\Consumer\ConfigInterface $consumerConfig
      * @param \Magento\Framework\App\DeploymentConfig $deploymentConfig
+     * @param \Magento\Framework\Event\ManagerInterface $eventManager
+     * @param \Magento\Framework\ObjectManagerInterface $objectManager
+     * @param \Magento\Framework\App\AreaList|null $areaList
      * @param ConnectionTypeResolver|null $mqConnectionTypeResolver
+     * @param array $data
      */
     public function __construct(
         \Magento\Cron\Model\Config $cronconfig,
         directoryList $directoryList,
         \MageMojo\Cron\Model\ResourceModel\Schedule $resource,
+        \Magento\Framework\App\Console\Request $request,
+        \Magento\Framework\App\Console\Response $response,
         \Magento\Framework\App\MaintenanceMode $maintenance,
+        \Magento\Framework\App\State $state,
         \Magento\Framework\Filesystem\Driver\File $file,
         \Magento\Framework\MessageQueue\Consumer\ConfigInterface $consumerConfig,
         \Magento\Framework\App\DeploymentConfig $deploymentConfig,
-        ConnectionTypeResolver $mqConnectionTypeResolver = null
+        \Magento\Framework\Event\ManagerInterface $eventManager,
+        \Magento\Framework\ObjectManagerInterface $objectManager,
+        \Magento\Framework\Process\PhpExecutableFinderFactory $phpExecutableFinderFactory,
+        \Magento\Store\Model\App\Emulation $appEmulation,
+        \Magento\Framework\App\AreaList $areaList = null,
+        ConnectionTypeResolver $mqConnectionTypeResolver = null,
+        array $data = []
     ) {
         $this->cronconfig = $cronconfig;
         $this->directoryList = $directoryList;
         $this->resource = $resource;
+        $this->request = $request;
+        $this->response = $response;
         $this->maintenance = $maintenance;
+        $this->state = $state;
         $this->file = $file;
         $this->consumerConfig = $consumerConfig;
         $this->deploymentConfig = $deploymentConfig;
+        $this->eventManager = $eventManager;
+        $this->objectManager = $objectManager;
+        $this->phpExecutableFinder = $phpExecutableFinderFactory->create();
+        $this->appEmulation = $appEmulation;
+        $this->areaList = $areaList ?: $this->objectManager->create(\Magento\Framework\App\AreaList::class);
         $this->mqConnectionTypeResolver = $mqConnectionTypeResolver
-            ?: ObjectManager::getInstance()->get(ConnectionTypeResolver::class);
+            ?: $this->objectManager->get(ConnectionTypeResolver::class);
+
+        parent::__construct($data);
     }
 
     /**
@@ -238,10 +315,10 @@ class Schedule extends \Magento\Framework\Model\AbstractModel
      */
     public function getRuntimeParameters() {
       $this->simultaniousJobs = $this->resource->getConfigValue('magemojo/cron/jobs',0,'default');
-      $this->phpproc = $this->resource->getConfigValue('magemojo/cron/phpproc',0,'default');
+      $this->phpproc = $this->resource->getConfigValue('magemojo/cron/phpproc',0,'default') ?: $this->phpExecutableFinder->find() ?: 'php';
       $this->maxload = $this->resource->getConfigValue('magemojo/cron/maxload',0,'default');
       $this->history = $this->resource->getConfigValue('magemojo/cron/history',0,'default');
-      $this->cronenabled = $this->resource->getConfigValue('magemojo/cron/enabled',0,'default');
+      $this->cronenabled = $this->resource->getConfigValue('magemojo/cron/enabled',0,'default') && $this->deploymentConfig->get('cron/enabled', 1);
     }
 
     /**
@@ -349,6 +426,42 @@ class Schedule extends \Magento\Framework\Model\AbstractModel
     }
 
     /**
+     * @inheritDoc
+     */
+    public function launch()
+    {
+        $this->startEnvironmentEmulation();
+
+        $this->execute();
+        $this->response->setCode(0);
+
+        return $this->response;
+    }
+
+    /**
+     * @return void
+     * @throws \Magento\Framework\Exception\LocalizedException
+     */
+    public function startEnvironmentEmulation()
+    {
+        $this->state->setAreaCode(Area::AREA_CRONTAB);
+
+        $configLoader = $this->objectManager->get(ConfigLoaderInterface::class);
+        $this->objectManager->configure($configLoader->load(Area::AREA_CRONTAB));
+
+        $this->areaList = $this->objectManager->get(AreaList::class);
+        $this->areaList->getArea(Area::AREA_CRONTAB)->load(Area::PART_TRANSLATE);
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function catchException(\Magento\Framework\App\Bootstrap $bootstrap, \Exception $exception)
+    {
+        return false;
+    }
+
+    /**
      * Get an individual configuration for a job_code
      *
      * @return array|false
@@ -380,6 +493,7 @@ class Schedule extends \Magento\Framework\Model\AbstractModel
       $code = str_replace('<<method>>',$jobconfig["method"],$code);
       $code = str_replace('<<instance>>',$jobconfig["instance"],$code);
       $code = str_replace('<<scheduleid>>',$scheduleid,$code);
+      $code = str_replace('<<group_id>>', $jobconfig['group'], $code);
       $code = str_replace('<<name>>',$jobconfig["name"]??'',$code);
       return $code;
     }
@@ -577,7 +691,28 @@ class Schedule extends \Magento\Framework\Model\AbstractModel
       }
     }
 
+    /**
+     * Execute a cron from CLI
+     *
+     * @param string $jobname
+     *
+     * @return void
+     * @throws \Magento\Framework\Exception\LocalizedException
+     */
     public function executeImmediate($jobname) {
+        $this->appEmulation->startEnvironmentEmulation(0, Area::AREA_ADMINHTML, true);
+
+        return $this->state->emulateAreaCode(Area::AREA_CRONTAB, [$this, 'executeImmediateWrapper'], [$jobname]);
+    }
+
+    /**
+     * @param $jobname
+     *
+     * @return void
+     * @throws \Magento\Framework\Exception\LocalizedException
+     */
+    public function executeImmediateWrapper($jobname)
+    {
       #Force UTC
       date_default_timezone_set('UTC');
       $this->basedir = $this->directoryList->getRoot();
@@ -591,23 +726,21 @@ class Schedule extends \Magento\Framework\Model\AbstractModel
       $schedule = array('scheduled_at' => time());
       $scheduled = $this->resource->saveSchedule($jobconfig, time(), $schedule);
 
-      $state = ObjectManager::getInstance()->get("Magento\Framework\App\State");
-      try {
-          $state->setAreaCode("crontab");
-      } catch (\Exception $e) {
-      }
-      $areaList = ObjectManager::getInstance()->get(AreaList::class);
-      $areaList->getArea(Area::AREA_CRONTAB)->load(Area::PART_TRANSLATE);
+      $instance = $this->objectManager->get($jobconfig["instance"]);
+      $schedule = $this->objectManager->get(\Magento\Cron\Model\Schedule::class)->load($scheduled[0]["schedule_id"]);
 
-      $instance = ObjectManager::getInstance()->get($jobconfig["instance"]);
-      $schedule = ObjectManager::getInstance()->get("\Magento\Cron\Model\Schedule")->load($scheduled[0]["schedule_id"]);
+      $jobGroup = $jobconfig['group'];
+      $jobCode = $schedule->getJobCode();
 
-      $this->resource->setJobStatus($scheduled[0]["schedule_id"],'running',NULL);
+      $this->resource->setJobStatus($scheduled[0]["schedule_id"], \Magento\Cron\Model\Schedule::STATUS_RUNNING, null);
+
+      $this->eventManager->dispatch('cron_job_run', ['job_name' => "cron/$jobGroup/$jobCode"]);
+
       try {
         $instance->{$jobconfig["method"]}($schedule);
-        $this->resource->setJobStatus($scheduled[0]["schedule_id"],'success',NULL);
-      } catch (Exception $e) {
-        $this->resource->setJobStatus($scheduled[0]["schedule_id"],'error',$e->getMessage());
+        $this->resource->setJobStatus($scheduled[0]["schedule_id"], \Magento\Cron\Model\Schedule::STATUS_SUCCESS, null);
+      } catch (\Exception $e) {
+        $this->resource->setJobStatus($scheduled[0]["schedule_id"], \Magento\Cron\Model\Schedule::STATUS_ERROR, $e->getMessage());
       }
     }
 
@@ -718,7 +851,7 @@ class Schedule extends \Magento\Framework\Model\AbstractModel
       $time = date('Y-m-d H:i:s', time());
       print "[$time] ERR $msg" . PHP_EOL;
     }
-  
+
     /**
      *  Checks if a consumers job can be run
      *
