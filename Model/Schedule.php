@@ -3,12 +3,25 @@ namespace MageMojo\Cron\Model;
 
 use Magento\Framework\App\Area;
 use Magento\Framework\App\AreaList;
-use Magento\Framework\App\ObjectManager;
+use Magento\Framework\App\Config\ScopeConfigInterface;
 use Magento\Framework\App\Filesystem\directoryList;
 use Magento\Framework\Exception\FileSystemException;
 use Magento\Framework\MessageQueue\ConnectionTypeResolver;
 use Magento\Framework\MessageQueue\Consumer\Config\ConsumerConfigItemInterface;
+use Magento\Framework\MessageQueue\QueueRepository;
 use Magento\Framework\ObjectManager\ConfigLoaderInterface;
+
+use function extension_loaded;
+use function newrelic_end_transaction;
+use function ini_get;
+use function newrelic_start_transaction;
+use function newrelic_name_transaction;
+use function newrelic_background_job;
+use function newrelic_end_of_transaction;
+use function getmypid;
+use function strpos;
+use function is_int;
+use function file_exists;
 
 /**
  * Class Schedule
@@ -19,19 +32,19 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
 {
     const VAR_FOLDER_PATH = BP . '/'. directoryList::VAR_DIR;
     const CRON_FOLDER_PATH = '/cron/schedule';
+    const CRON_SERVICE_PIDFILE = 'cron.pid';
 
-    private $simultaniousJobs;
+    private $simultaneousJobs;
     private $phpproc;
     private $maxload;
     private $history;
-    private $scheduleoverrides;
     private $config;
     private $cronenabled;
-    private $runningPids;
     private $cronconfig;
     private $lastJobTime;
     private $pendingjobs;
     private $loadavgtest;
+    private $governor;
     private $directoryList;
     private $resource;
 
@@ -55,6 +68,16 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
     private $basedir;
     private $consumerConfig;
     private $deploymentConfig;
+
+    /**
+     * @var \Magento\Framework\App\Config\ScopeConfigInterface
+     */
+    private $scopeConfig;
+
+    /**
+     * @var \Magento\Framework\MessageQueue\QueueRepository
+     */
+    private $queueRepository;
 
     /**
      * @var \Magento\Framework\Event\ManagerInterface
@@ -92,8 +115,8 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
      * Schedule constructor.
      *
      * @param \Magento\Cron\Model\Config $cronconfig
-     * @param directoryList $directoryList
-     * @param ResourceModel\Schedule $resource
+     * @param \Magento\Framework\App\Filesystem\directoryList $directoryList
+     * @param \MageMojo\Cron\Model\ResourceModel\Schedule $resource
      * @param \Magento\Framework\App\Console\Request $request
      * @param \Magento\Framework\App\Console\Response $response
      * @param \Magento\Framework\App\MaintenanceMode $maintenance
@@ -101,10 +124,14 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
      * @param \Magento\Framework\Filesystem\Driver\File $file
      * @param \Magento\Framework\MessageQueue\Consumer\ConfigInterface $consumerConfig
      * @param \Magento\Framework\App\DeploymentConfig $deploymentConfig
+     * @param \Magento\Framework\App\Config\ScopeConfigInterface $scopeConfig
+     * @param \Magento\Framework\MessageQueue\QueueRepository $queueRepository
      * @param \Magento\Framework\Event\ManagerInterface $eventManager
      * @param \Magento\Framework\ObjectManagerInterface $objectManager
+     * @param \Magento\Framework\Process\PhpExecutableFinderFactory $phpExecutableFinderFactory
+     * @param \Magento\Store\Model\App\Emulation $appEmulation
      * @param \Magento\Framework\App\AreaList|null $areaList
-     * @param ConnectionTypeResolver|null $mqConnectionTypeResolver
+     * @param \Magento\Framework\MessageQueue\ConnectionTypeResolver|null $mqConnectionTypeResolver
      * @param array $data
      */
     public function __construct(
@@ -118,6 +145,8 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
         \Magento\Framework\Filesystem\Driver\File $file,
         \Magento\Framework\MessageQueue\Consumer\ConfigInterface $consumerConfig,
         \Magento\Framework\App\DeploymentConfig $deploymentConfig,
+        ScopeConfigInterface $scopeConfig,
+        QueueRepository $queueRepository,
         \Magento\Framework\Event\ManagerInterface $eventManager,
         \Magento\Framework\ObjectManagerInterface $objectManager,
         \Magento\Framework\Process\PhpExecutableFinderFactory $phpExecutableFinderFactory,
@@ -136,6 +165,8 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
         $this->file = $file;
         $this->consumerConfig = $consumerConfig;
         $this->deploymentConfig = $deploymentConfig;
+        $this->scopeConfig = $scopeConfig;
+        $this->queueRepository = $queueRepository;
         $this->eventManager = $eventManager;
         $this->objectManager = $objectManager;
         $this->phpExecutableFinder = $phpExecutableFinderFactory->create();
@@ -154,17 +185,12 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
      */
     public function getConfig() {
       $jobs = array();
-      $scheduleoverrides = array();
       foreach($this->cronconfig->getJobs() as $groupname=>$group) {
-        $override =  $this->resource->getConfigValue('system/cron/'.$groupname.'/schedule_generate_every',0,'default');
-        if ($override) {
-          $scheduleoverrides[$groupname] = '*/'.$override;
-        }
         foreach($group as $name=>$job) {
           if (!is_array($job)) continue;
           if (!isset($job["schedule"])) {
             if (isset($job["config_path"])) {
-              $schedule =  $this->resource->getConfigValue($job["config_path"],0,'default');
+              $schedule =  $this->scopeConfig->getValue($job["config_path"]);
               if ($schedule) {
                 $job["schedule"] = $schedule;
               }
@@ -179,8 +205,8 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
           $jobs[$name] = $job;
         }
       }
-      $this->scheduleoverrides = $scheduleoverrides;
       $this->config = $jobs;
+        return $jobs;
     }
 
     /**
@@ -192,15 +218,27 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
       #Keep the service alive indefinitely
       ini_set('max_execution_time', 0);
 
+      #Set transaction name for New Relic, if installed
+      if (extension_loaded ('newrelic')) {
+        newrelic_name_transaction ('magemojo_cron');
+        newrelic_background_job();
+      }
+
       $this->getConfig();
       $this->getRuntimeParameters();
+
+      if (!$this->cronenabled) {
+        $this->printWarn('Cron is disabled');
+        return;
+      }
+
       $this->cleanupProcesses();
       $this->lastJobTime = $this->resource->getLastJobTime();
       if ($this->lastJobTime < time() - 360) {
         $this->lastJobTime = time();
       }
-      $pid = getmypid();
-      $this->setPid('cron.pid',$pid);
+      $pid = $this->getMyPid();
+      $this->setPid(self::CRON_SERVICE_PIDFILE,$pid);
       $this->pendingjobs = $this->resource->getAllPendingJobs();
       $this->loadavgtest = true;
       if (!is_readable('/proc/cpuinfo')) {
@@ -210,14 +248,22 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
     }
 
     /**
+     * @return false|int
+     */
+    public function getMyPid(){
+        $pid = getmypid();
+
+        return $pid;
+    }
+
+    /**
      * Check file in var/cron for running process pid or schedule output
      *
-     * @return string
+     * @return string|false|null
      */
     public function checkPid($pidfile) {
       if (file_exists(self::VAR_FOLDER_PATH.'/cron/'.$pidfile)){
-        $scheduleid = file_get_contents(self::VAR_FOLDER_PATH.'/cron/'.$pidfile);
-        return $scheduleid;
+        return file_get_contents(self::VAR_FOLDER_PATH.'/cron/'.$pidfile);
       }
       return false;
     }
@@ -228,7 +274,6 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
      * @return void
      */
     public function setPid($file,$scheduleid) {
-      #print 'file='.$file;
       file_put_contents(self::VAR_FOLDER_PATH.'/cron/'.$file,$scheduleid);
     }
 
@@ -254,10 +299,16 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
       $filelist = scandir(self::VAR_FOLDER_PATH.'/cron/');
 
       foreach ($filelist as $file) {
-        if ($file != 'cron.pid') {
+        /* ignore current dir, parent dir, and the cron service file itself. */
+        $isCronPidFile = is_int(strpos($file,"cron"));
+        if ($isCronPidFile && $file != self::CRON_SERVICE_PIDFILE) {
           $pid = str_replace('cron.','',$file);
           if (is_numeric($pid)) {
-            $pids[$pid] = file_get_contents(self::VAR_FOLDER_PATH.'/cron/'.$file);
+            /* add to an array indexed by the hostname */
+            $filePath = self::VAR_FOLDER_PATH.'/cron/'.$file;
+            if (file_exists($filePath)) {
+              $pids[$pid] = file_get_contents(self::VAR_FOLDER_PATH . '/cron/' . $file);
+            }
           }
         }
       }
@@ -267,9 +318,11 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
     /**
      * Check if a pid is still running
      *
+     * @param $pid
      * @return bool
      */
-    public function checkProcess($pid) {
+    public function checkProcess($pid)
+    {
       if (file_exists( "/proc/$pid" )){
         return true;
       }
@@ -295,17 +348,23 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
      * @return void
      */
     public function cleanupProcesses() {
-      $running = array();
-      $pids =  $this->getRunningPids();
-      foreach ($pids as $pid=>$scheduleid) {
-        if (!$this->checkProcess($pid)) {
-          $this->unsetPid('cron.'.$pid);
-          $this->resource->resetSchedule();
-        } else {
-          array_push($running,$pid);
+      $this->printInfo('Running Process Cleanup');
+
+      $this->checkRunningJobs();
+      if ($this->governor) {
+        $this->consumersCleanup();
+      }
+    }
+
+    public function consumersCleanup() {
+      $this->printInfo('Running Consumers Cleanup');
+      while ($pgrep = exec('pgrep -x strace')) {
+        $pids = explode("\n",$pgrep);
+        foreach ($pids as $pid) {
+          $childpid = $this->getChildProcess($pid);
+          $this->consumersTerminate($pid);
         }
       }
-      $this->runningPids = $running;
     }
 
     /**
@@ -314,19 +373,23 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
      * @return void
      */
     public function getRuntimeParameters() {
-      $this->simultaniousJobs = $this->resource->getConfigValue('magemojo/cron/jobs',0,'default');
+      $this->simultaneousJobs = $this->resource->getConfigValue('magemojo/cron/jobs',0,'default');
       $this->phpproc = $this->resource->getConfigValue('magemojo/cron/phpproc',0,'default') ?: $this->phpExecutableFinder->find() ?: 'php';
       $this->maxload = $this->resource->getConfigValue('magemojo/cron/maxload',0,'default');
       $this->history = $this->resource->getConfigValue('magemojo/cron/history',0,'default');
       $this->cronenabled = $this->resource->getConfigValue('magemojo/cron/enabled',0,'default') && $this->deploymentConfig->get('cron/enabled', 1);
+      $this->governor = $this->resource->getConfigValue('magemojo/cron/consumersgovernor',0,'default');
     }
 
     /**
      * Checks an individual cron expression for validity
      *
+     * @param $expr
+     * @param $value
      * @return bool
      */
-    public function checkCronExpression($expr,$value) {
+    public function checkCronExpression($expr,$value)
+    {
       foreach (explode(',',$expr) as $e) {
         if (($e == '*') or ($e == $value)) {
           return true;
@@ -360,10 +423,6 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
         if (isset($job["schedule"])) {
           $schedule = array();
           $expr = explode(' ',$job["schedule"]);
-          #check if the generate schedule override is set and change the minute expression accordingly
-          if (isset($this->scheduleoverrides[$job["group"]])) {
-            $expr[0] = $this->scheduleoverrides[$job["group"]];
-          }
           $buildtime = (floor($from/60)*60);
           while ($buildtime < $to) {
             $buildtime = $buildtime + 60;
@@ -414,9 +473,12 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
       $this->basedir = $this->directoryList->getRoot();
       $this->checkCronFolderExistence();
       $this->printInfo('Healthchecking Cron Service');
-      $pid = $this->checkPid('cron.pid');
-      if (!$this->checkProcess($pid) or (!$pid)) {
-        $this->initialize();
+      $pid = $this->checkPid(self::CRON_SERVICE_PIDFILE);
+      /* continue only if we lack a cron service pid or if the current host was running the service, but the process was killed */
+      $noPid = empty($pid);
+      $processRunning = $this->checkProcess($pid);
+      $this->initialize();
+      if ($noPid || !($processRunning)) {
         if ($this->cronenabled == 0) {
           exit;
         } else {
@@ -493,7 +555,7 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
       $code = str_replace('<<method>>',$jobconfig["method"],$code);
       $code = str_replace('<<instance>>',$jobconfig["instance"],$code);
       $code = str_replace('<<scheduleid>>',$scheduleid,$code);
-      $code = str_replace('<<group_id>>', $jobconfig['group'], $code);
+      $code = str_replace('<<group_id>>', $jobconfig['group'] ?? 'default', $code);
       $code = str_replace('<<name>>',$jobconfig["name"]??'',$code);
       return $code;
     }
@@ -514,11 +576,13 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
           return false;
         }
       }
-      if ($this->isMaintenanceEnabled()) {
+
+      $maint = $this->isMaintenanceEnabled();
+      if ($maint) {
         $this->printWarn("Crons suspended due to maintenance mode being enabled");
         return false;
       }
-      if ($jobcount > $this->simultaniousJobs) {
+      if ($jobcount > $this->simultaneousJobs) {
         return false;
       }
       return true;
@@ -544,7 +608,8 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
      *
      * @return collection
      */
-    function getPendingJobs() {
+    function getPendingJobs()
+    {
       $jobs = array();
       foreach ($this->pendingjobs as $job) {
         if (($job["status"] == 'pending') and ($job["scheduled_at"] < date('Y-m-d H:i:s',time()))) {
@@ -557,6 +622,7 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
         }
       }
 
+      return $jobs;
     }
 
     /**
@@ -567,6 +633,19 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
     function setJobStatus($scheduleid,$status,$output) {
       $this->pendingjobs[$scheduleid]["status"] = $status;
       $this->resource->setJobStatus($scheduleid,$status,$output);
+    }
+
+    /**
+     * Set a job by schedule id
+     *
+     * @return array
+     */
+    function getJob($scheduleid) {
+      if (isset($this->pendingjobs[$scheduleid])) {
+        return $this->pendingjobs[$scheduleid];
+      }
+
+      return NULL;
     }
 
     /**
@@ -581,14 +660,17 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
       #Force UTC
       date_default_timezone_set('UTC');
 
-      #Set transaction name for New Relic, if installed
-      if (extension_loaded ('newrelic')) {
-        newrelic_name_transaction ('magemojo_cron_service');
-      }
-
       $this->printInfo("Starting Cron Service");
       #Loop until killed or heat death of the universe
       while (true) {
+        if (extension_loaded ('newrelic')) {
+          /* send the transaction data up to newrelic. Start fresh for this service loop. */
+          newrelic_end_transaction();
+
+          newrelic_start_transaction(ini_get('newrelic.appname'), ini_get('newrelic.license'));
+          newrelic_name_transaction ('magemojo_cron_service');
+          newrelic_background_job();
+        }
         $this->getRuntimeParameters();
         if ($this->cronenabled == 0 || $this->isMaintenanceEnabled()) {
           $this->printWarn("Stopped Cron Service by maintenance is enabled");
@@ -604,33 +686,23 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
         }
 
         #Checking running jobs
-        $running = $this->getRunningPids();
-        $jobcount = 0;
-        foreach ($running as $pid=>$scheduleid) {
-          if (!$this->checkProcess($pid)) {
-            $output = $this->getJobOutput($scheduleid);
-            #If output had "error" in the text, assume it errored
-            if (strpos(strtolower($output),'error') > 0) {
-              $this->setJobStatus($scheduleid,'error',$output);
-            } else {
-              $this->setJobStatus($scheduleid,'success',$output);
-            }
-            $this->unsetPid('cron.'.$pid);
-            $this->unsetPid('schedule.'.$scheduleid);
-          } else {
-            $jobcount++;
-          }
-        }
+        $jobcount = $this->checkRunningJobs();
 
         #Get pending jobs
         $pending = $this->resource->getPendingJobs();
         $maxConsumerMessages = intval($this->deploymentConfig->get('cron_consumers_runner/max_messages', 10000));
         $consumersTimeout =  intval($this->resource->getConfigValue('magemojo/cron/consumers_timeout',0,'default'));
+        $exportersTimeout =  intval($this->resource->getConfigValue('magemojo/cron/exporters_timeout',0,'default'));
         if (!$consumersTimeout) {
           $consumersTimeout = 0;
         }
+
+        if (!$exportersTimeout) {
+          $exportersTimeout = 0;
+        }
+
         while (count($pending) && $this->canRunJobs($jobcount, $pending)) {
-          $job = array_pop($pending);
+          $job = array_shift($pending);
           $runcheck = $this->resource->getJobByStatus($job["job_code"],'running');
           if (count($runcheck) == 0) {
             $jobconfig = $this->getJobConfig($job["job_code"]);
@@ -640,15 +712,25 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
             #if this is a consumers job use a different runtime cmd
             if (isset($jobconfig["consumers"]) && $jobconfig["consumers"]) {
               $consumerName = str_replace("mm_consumer_","",$jobconfig["name"]);
+              if (!$this->canExecuteConsumer($consumerName)) {
+                continue;
+              }
               $runtime = "bin/magento queue:consumers:start " . escapeshellarg($consumerName);
               if ($maxConsumerMessages) {
                 $runtime .= ' --max-messages=' . $maxConsumerMessages;
               }
               $runtime = escapeshellcmd($this->phpproc)." ".$runtime;
-              if ($consumersTimeout != 0) {
+              if ($consumerName === 'exportProcessor') {
+                if ($exportersTimeout != 0) {
+                  $runtime = "timeout -s 9 " . $exportersTimeout . " " . $runtime;
+                }
+              } elseif ($consumersTimeout != 0) {
                 $runtime = "timeout -s 9 ".$consumersTimeout." ".$runtime;
               }
               $cmd = $runtime;
+              if ($this->governor) {
+                $cmd = 'strace '.$cmd;
+              }
             } else {
               $runtime = $this->prepareStub($jobconfig,$stub,$job["schedule_id"]);
               if ($runtime) {
@@ -658,7 +740,7 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
                   continue;
               }
             }
-            $exec = sprintf("%s; %s &> %s & echo $!",
+            $exec = sprintf("%s; %s > %s 2>&1 & echo $!",
               'cd ' . escapeshellarg($this->basedir),
               $cmd,
               escapeshellarg($this->basedir . "/var/cron/schedule." . $job["schedule_id"])
@@ -667,7 +749,7 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
 
             #If the output is not numeric then it errored due to syntax
             if (is_numeric($pid)) {
-              $this->setPid('cron.'.$pid,$job["schedule_id"]);
+              $this->setPid($this->getPidFileName($pid), $job["schedule_id"]);
               $this->setJobStatus($job["schedule_id"],'running',NULL);
               $jobcount++;
             } else {
@@ -685,6 +767,10 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
 
         #Sanity check processes and look for escaped inmates
         $this->asylum();
+        if (extension_loaded ('newrelic')) {
+          /* stop timing the current transaction, but continue instrumenting it */
+          newrelic_end_of_transaction();
+        }
 
         #Take a break
         sleep(5);
@@ -746,23 +832,86 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
 
 
     /**
+     * Check for consumers processes in infinate loop states and terminate them
+     *
+     * @return void
+     */
+    public function consumersGovenor($pid,$scheduleid) {
+      $tail = $this->getJobOutput($scheduleid,True);
+      #Check for repeating strings indicating an infinately looping processes
+      $checks = array(
+        $this->consumersCheck($tail,'SELECT `queue_message`.`top"',1),
+        $this->consumersCheck($tail,'rt_sigsuspend([]',0)
+      );
+      if (in_array(True,$checks)) {
+        $this->consumersTerminate($pid);
+      }
+    }
+
+    /**
+     * Check for consumers processes in infinite loop states and terminate them
+     *
+     * @param $log
+     * @param $loopstring
+     * @param $instances
+     * @return bool
+     */
+    public function consumersCheck($log,$loopstring,$instances): bool
+    {
+      if (substr_count($log,$loopstring) > $instances) {
+        return True;
+      }
+      return False;
+    }
+
+    /**
+     * Terminate a consumers process
+     *
+     * @return void
+     */
+    public function consumersTerminate($pid) {
+      $childpid = $this->getChildProcess($pid);
+      if ($this->checkProcess($pid)) {
+        exec("kill -9 $childpid");
+      }
+    }
+
+    /**
+     * Gets the child process of a running cron
+     *
+     * @return int
+     */
+    public function getChildProcess($pid) {
+      $childpid = exec('pgrep -P '.$pid);
+      if ($childpid) {
+        #Recursive call to get the final php process
+        return $this->getChildProcess($childpid);
+      } else {
+        return $pid;
+      }
+    }
+
+
+    /**
      * Check for processes that have gone insane and handle the errors
      *
      * @return void
      */
     public function asylum() {
-      #Look for running pids and compare to jobs listed as running in cron_schedule
+      $this->checkRunningJobs();
+
+      //Look for anything still "running" and compare to jobs listed as running in cron_schedule
       $crons = $this->getRunningPids();
       $jobs = $this->resource->getJobsByStatus('running');
       $running = array();
       $schedules = array();
       $pids = array();
       foreach ($crons as $pid=>$scheduleid) {
-        array_push($running,$scheduleid);
+        $running[] = $scheduleid;
         $pids[$scheduleid] = $pid;
       }
       foreach ($jobs as $job) {
-        array_push($schedules,$job["schedule_id"]);
+         $schedules[] = $job["schedule_id"];
       }
       $diff = array_diff($schedules,$running);
       foreach ($diff as $scheduleid) {
@@ -777,12 +926,12 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
 
         $pid = $pids["scheduleid"];
         $this->printInfo("Found orphaned pid file for schedule_id ".$scheduleid);
-        $this->unsetPid('cron.'.$pid);
+        $this->unsetPid($this->getPidFileName($pid));
       }
 
       #Detect a coup and acquiesce
-      $pid = getmypid();
-      $execpid = $this->checkPid('cron.pid');
+      $pid = $this->getMyPid();
+      $execpid = $this->checkPid(self::CRON_SERVICE_PIDFILE);
       if ($pid != $execpid){
         exit;
       }
@@ -813,10 +962,14 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
       $this->basedir = $this->directoryList->getRoot();
       $this->checkCronFolderExistence();
       $this->initialize();
+      /* gets a list of all schedule ids in the cron table */
       $scheduleids = $this->resource->cleanSchedule($this->history);
+      /* gets a list of all cron schedule output files */
       $fileids = $this->getScheduleOutputIds();
+      /* get a list of all schedule output files that are no longer in the cron schedule file */
       $diff = array_diff($fileids,$scheduleids);
       foreach ($diff as $id) {
+        /* remove the old cron schedule output files */
         $this->unsetPid('schedule.'.$id);
       }
     }
@@ -855,6 +1008,8 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
     /**
      *  Checks if a consumers job can be run
      *
+     * @param ConsumerConfigItemInterface $consumerConfig
+     * @param array $allowedConsumers
      * @return bool
      */
     private function canConsumerBeRun(ConsumerConfigItemInterface $consumerConfig, array $allowedConsumers = []): bool {
@@ -866,11 +1021,90 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
       $connectionName = $consumerConfig->getConnection();
       try {
         $this->mqConnectionTypeResolver->getConnectionType($connectionName);
-      } catch (\LogicException $e) {
+      } catch (LogicException $e) {
         $this->printInfo(sprintf('Consumer "%s" skipped as required connection "%s" is not configured. %s',$consumerName,$connectionName,$e->getMessage()));
         return false;
       }
       return true;
     }
 
+    /**
+     * @param string $pid
+     *
+     * @return string
+     */
+    public function getPidFileName($pid)
+    {
+        $prefix = 'cron.';
+
+        return $prefix . $pid;
+    }
+
+    private function canExecuteConsumer($consumerName)
+    {
+      $config = $this->consumerConfig->getConsumer($consumerName);
+      $connectionName = $config->getConnection();
+      $queueName = $config->getQueue();
+      try {
+        return $this->checkMessagesAvailable(
+          $connectionName,
+          $queueName
+        );
+      } catch (\LogicException $e) {
+        return false;
+      }
+    }
+
+    private function checkMessagesAvailable($connectionName, $queueName): bool  {
+      $queue = $this->queueRepository->get($connectionName, $queueName);
+      $message = $queue->dequeue();
+      if ($message) {
+        $queue->reject($message);
+        return true;
+      }
+      return false;
+    }
+
+
+    /**
+     * @return int number of currently running jobs
+     */
+    public function checkRunningJobs(){
+      $running = $this->getRunningPids();
+      $jobcount = 0;
+      foreach ($running as $pid=>$scheduleid) {
+
+        if ($this->governor) {
+          $job = $this->getJob($scheduleid);
+          if (isset($job["job_code"])) {
+            $jobconfig = $this->getJobConfig($job["job_code"]);
+            if (isset($jobconfig["consumers"]) && $jobconfig["consumers"]) {
+              #run the consumers governor
+              $this->consumersGovenor($pid, $scheduleid);
+            }
+          }
+        }
+
+        if (!$this->checkProcess($pid)) {
+          #IF this is a consumers job it was run under strace and we do not want this output
+          if (isset($jobconfig["consumers"]) && $jobconfig["consumers"]) {
+            $output = '';
+          } else {
+            $output = $this->getJobOutput($scheduleid);
+          }
+
+          #If output had "error" in the text, assume it errored
+          if (strpos(strtolower($output),'error') > 0) {
+            $this->setJobStatus($scheduleid,'error',$output);
+          } else {
+            $this->setJobStatus($scheduleid,'success',$output);
+          }
+          $this->unsetPid($this->getPidFileName($pid));
+          $this->unsetPid('schedule.'.$scheduleid);
+        } else {
+          $jobcount++;
+        }
+      }
+      return $jobcount;
+    }
 }

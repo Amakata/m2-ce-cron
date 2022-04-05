@@ -3,11 +3,11 @@
 # Cron
 #### This module for Magento 2 overrides base magento cron functionality, fixes known bugs, and provides a cron service model to control cron process execution. 
 
-![Version 1.3.5](https://img.shields.io/badge/Version-1.3.5-green.svg)
+![Version 1.3.7](https://img.shields.io/badge/Version-1.3.7-green.svg)
 
 NOTICE: Version 1.3x is only supported for Magento 2.3 and above. Older Magento 2 version use module version 1.2
 
-The default cron can overlap and fill the cron_schedule table, which can cause exponentially more jobs to run on each cron interval, until finally the crons run continously and never complete.  The high number of cron jobs can also crash servers hosting Magento 2. 
+The default cron can overlap and fill the cron_schedule table, which can cause exponentially more jobs to run on each cron interval, until finally the crons run continuously and never complete.  The high number of cron jobs can also crash servers hosting Magento 2. 
 
 This module replaces the cron management with a service that accepts jobs. As jobs are scheduled, they are picked up by this service for execution.  If a job is already running and another is picked up with the same job code, the new one is marked as missed.  Duplicate jobs are prevented from running, reducing server overhead.
 
@@ -19,7 +19,12 @@ In addition to the service model many other enhancements have been made.  For ex
 
 In version 1.1 Cron Reporting was added to the admin to show job code statistics and list cron run errors.
 
-In version 1.3 fixes are implemented for the consumers_runner cron job. This job code is a throwback from magento 1 and is more frequently used in Magento 2.3. It runs under its own scheduler which can execute many child jobs and bomb the system. In this version of the module this parent job is intercepted and written as individual jobs in the cron_schedule table and then run in a sane manner from there. These consumer jobs can also go into infinate loops, so a timeout is imposed on them by default of 30 seconds. This setting can be adjusted in the admin.
+In version 1.2.5 Cron execution will run if in maintenance mode with exempt IPs, allowing for full internal verification including necessary crons.
+
+In version 1.3 fixes are implemented for the consumers_runner cron job. This job code is a throwback from magento 1 and is more frequently used in Magento 2.3. It runs under its own scheduler which can execute many child jobs and bomb the system. In this version of the module this parent job is intercepted and written as individual jobs in the cron_schedule table and then run in a sane manner from there. These consumer jobs can also go into infinite loops, so a timeout is imposed on them by default of 30 seconds. This setting can be adjusted in the admin.
+
+In version 1.3.7 the consumers governor was added to terminate idle consumers jobs. Bugs in these jobs otherwise prevent these jobs from completing.
+
 
 ## Contributing
 See [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -32,7 +37,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 * Prevents cron history records from exploding.
 
-* Stops cron processes from overruning each other.
+* Stops cron processes from overrunning each other.
 
 * Stops the cron from running while system is under configurable load conditions.
 
@@ -51,6 +56,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 **Max Load Average** - Defined by the php function sys.getloadavg() / number of cpu cores. The function sys.getloadavg() is reported 1.0 for each core in use, just like the load average reported in top.  The number of cpu cores is pulled from /proc/cpuinfo and load average is divided by this number. Example: If you have 8 cores and you're using 6 then this is returned as 0.75. If your Max Load Average is 0.76 your crons will not run. Your load average falls to 0.74.  Your crons will run.  Any cron that was scheduled to run but didn't will be run.  If the same cron was missed multiple times, the most recent job will run, and the rest will be marked as missed. Default is 0.75 (75% of your available cpu).
 
 **History Retention** - The number of days history to keep in the cron_schedule table. Default 1 (1 day).
+
+**Consumers Job Timeout** - The number of seconds to allow a consumer job to run. These jobs can infinitely run under some conditions.
+
+**Exporters Job Timeout** - The number of seconds to allow the exportProcessor job to run. Default 3600 seconds.
+
+**Consumers Govenor:** - Many bugs in consumers processes cause them to run infinitely. The consumers governor will detect these states and terminate the processes.
 
 ## Composer Install
 
