@@ -9,10 +9,10 @@
 <?php
   date_default_timezone_set('UTC');
   /* Times are stored in UTC, converting to the locale timezone for report */
-  $utc = date("Y-m-d h:i:s A");
+  $utc = date("Y-m-d h:i:s A") ?? '';
   $timezone = $block->getLocalTimezone();
   date_default_timezone_set($timezone);
-  $local = date("Y-m-d h:i:s A");
+  $local = date("Y-m-d h:i:s A") ?? '';
   $timediff = (strtotime($utc) - strtotime($local));
 ?>
 Execution times are in: <?= $timezone ?>
@@ -55,9 +55,9 @@ Execution times are in: <?= $timezone ?>
       $executed = $job["executed_at"];
       $runtime = '';
     } else {
-      $executed = strtotime((string)$job["executed_at"]);
+      $executed = strtotime((string)($job["executed_at"] ?? ''));
       $executed = date("Y-m-d h:i:s A",($executed - $timediff));
-      $runtime = strtotime((string)$job["finished_at"]) - strtotime((string)$job["executed_at"]) .'s';
+      $runtime = strtotime((string)($job["finished_at"] ?? '')) - strtotime((string)($job["executed_at"] ?? '')) .'s';
     }
     ?>
     <tr>
