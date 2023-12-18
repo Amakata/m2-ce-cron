@@ -1,25 +1,33 @@
 <?php
+
 namespace MageMojo\Cron\Console\Command;
 
-use Symfony\Component\Console\Command\Command;
-use Symfony\Component\Console\Input\InputInterface;
-use Symfony\Component\Console\Output\OutputInterface;
-use Symfony\Component\Console\Input\InputOption;
+use Magento\Cron\Observer\ProcessCronQueueObserver;
+use Magento\Framework\App\DeploymentConfig;
+use Magento\Framework\App\ObjectManager;
 use Magento\Framework\App\ObjectManagerFactory;
+use Magento\Framework\Console\Cli;
+use Magento\Framework\Exception\FileSystemException;
+use Magento\Framework\Exception\RuntimeException;
+use Magento\Framework\Shell\ComplexParameter;
 use Magento\Store\Model\Store;
 use Magento\Store\Model\StoreManager;
-use Magento\Framework\Console\Cli;
-use Magento\Cron\Observer\ProcessCronQueueObserver;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\OutputInterface;
 
 /**
  * Command for executing cron jobs
+ *
+ * @SuppressWarnings(PHPMD.CouplingBetweenObjects)
  */
 class CronCommand extends Command
 {
     /**
      * Name of input option
      */
-    const INPUT_KEY_GROUP = 'group';
+    public const INPUT_KEY_GROUP = 'group';
 
     /**
      * Object manager factory
@@ -29,18 +37,31 @@ class CronCommand extends Command
     private $objectManagerFactory;
 
     /**
+     * Application deployment configuration
+     *
+     * @var DeploymentConfig
+     */
+    private $deploymentConfig;
+
+    /**
      * Constructor
      *
      * @param ObjectManagerFactory $objectManagerFactory
+     * @param DeploymentConfig|null $deploymentConfig Application deployment configuration
      */
-    public function __construct(ObjectManagerFactory $objectManagerFactory)
-    {
+    public function __construct(
+        ObjectManagerFactory $objectManagerFactory,
+        DeploymentConfig $deploymentConfig = null
+    ) {
         $this->objectManagerFactory = $objectManagerFactory;
+        $this->deploymentConfig = $deploymentConfig ?: ObjectManager::getInstance()->get(
+            DeploymentConfig::class
+        );
         parent::__construct();
     }
 
     /**
-     * {@inheritdoc}
+     * @inheritdoc
      */
     protected function configure()
     {
@@ -65,11 +86,25 @@ class CronCommand extends Command
     }
 
     /**
-     * {@inheritdoc}
+     * Runs cron jobs if cron is not disabled in Magento configurations
+     *
+     * @param InputInterface $input
+     * @param OutputInterface $output
+     *
+     * @return int
+     * @throws FileSystemException
+     * @throws RuntimeException
      * @throws \Magento\Framework\Exception\LocalizedException
      */
     protected function execute(InputInterface $input, OutputInterface $output)
     {
+        if (!$this->deploymentConfig->get('cron/enabled', 1)) {
+            $output->writeln('<info>' . 'Cron is disabled. Jobs were not run.' . '</info>');
+
+            return Cli::RETURN_SUCCESS;
+        }
+        // phpcs:ignore Magento2.Security.Superglobal
+
         // Force set the scope for
         $omParams = $_SERVER;
         $omParams[StoreManager::PARAM_RUN_CODE] = 'admin';
@@ -77,11 +112,26 @@ class CronCommand extends Command
 
         $objectManager = $this->objectManagerFactory->create($omParams);
 
+        $params[self::INPUT_KEY_GROUP] = $input->getOption(self::INPUT_KEY_GROUP);
         $params[ProcessCronQueueObserver::STANDALONE_PROCESS_STARTED] = '0';
+        $bootstrap = $input->getOption(Cli::INPUT_KEY_BOOTSTRAP);
+        if ($bootstrap) {
+            $bootstrapProcessor = new ComplexParameter(Cli::INPUT_KEY_BOOTSTRAP);
+            $bootstrapOptionValues = $bootstrapProcessor->getFromString(
+                '--' . Cli::INPUT_KEY_BOOTSTRAP . '=' . $bootstrap
+            );
+            $bootstrapOptionValue = $bootstrapOptionValues[ProcessCronQueueObserver::STANDALONE_PROCESS_STARTED];
+            if ($bootstrapOptionValue) {
+                $params[ProcessCronQueueObserver::STANDALONE_PROCESS_STARTED] = $bootstrapOptionValue;
+            }
+        }
 
         /** @var \MageMojo\Cron\Model\Schedule $application */
         $application = $objectManager->create(\MageMojo\Cron\Model\Schedule::class, ['parameters' => $params]);
-
         $application->launch();
+
+        $output->writeln('<info>' . 'Ran jobs by schedule.' . '</info>');
+
+        return Cli::RETURN_SUCCESS;
     }
 }
