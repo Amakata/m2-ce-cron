@@ -1,20 +1,27 @@
 <?php
 namespace MageMojo\Cron\Model\ResourceModel;
 
-class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
-{
-    public function _construct()
-    {
-        $this->_init('cron_schedule', 'schedule_id');
-    }
+use function time;
+use function date;
 
+/**
+ * Class Schedule
+ *
+ * @package MageMojo\Cron\Model\ResourceModel
+ */
+class Schedule extends \Magento\Cron\Model\ResourceModel\Schedule
+{
     /**
      * Get a value from core_config_data
      *
+     * @param $path
+     * @param $scope
+     * @param $scopeid
      * @return string
      */
-    public function getConfigValue($path,$scope,$scopeid) {
-      #making our own function for this because it doesnt't work anyplace consistantly
+    public function getConfigValue($path,$scope,$scopeid)
+    {
+      #making our own function for this because it doesn't work anyplace consistently
       $connection = $this->getConnection();
       $select = $connection->select()
         ->from($this->getTable('core_config_data'),['value'])
@@ -31,7 +38,7 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
      * @return void
      */
     public function setConfigValue($path,$scope,$scopeid,$value) {
-      #making our own function for this because it doesnt't work anyplace consistantly
+      #making our own function for this because it doesn't work anyplace consistently
       $connection = $this->getConnection();
       $updatedata = array('value' => $value);
       $connection->update($this->getTable('core_config_data'),$updatedata,['path = ?' => $path,'scope_id = ?' => $scopeid,'scope = ?' => $scope]);
@@ -40,7 +47,7 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
     /**
      * Get all magemojo/cron values from core_config_data
      *
-     * @return void
+     * @return array
      */
     public function getSettings() {
       $connection = $this->getConnection();
@@ -54,7 +61,7 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
     /**
      * Get the max date scheduled from cron_schedule
      *
-     * @return timestamp
+     * @return string timestamp
      */
     public function getLastJobTime() {
       $connection = $this->getConnection();
@@ -67,7 +74,10 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
     /**
      * Create rows in cron_schedule for a job_code
      *
-     * @return void
+     * @param $job
+     * @param $created
+     * @param $schedule
+     * @return array
      */
     public function saveSchedule($job, $created, $schedule) {
       $connection = $this->getConnection();
@@ -112,10 +122,16 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
     public function getPendingJobs() {
       $connection = $this->getConnection();
       $select = $connection->select()
-            ->from($this->getTable('cron_schedule'),['max(schedule_id) as schedule_id','job_code','count(*) as job_count'])
+            ->from($this->getTable('cron_schedule'), [
+                'max(schedule_id) as schedule_id',
+                'job_code',
+                'count(*) as job_count',
+                'min(scheduled_at) as scheduled_at'
+            ])
             ->where('status = ?', 'pending')
             ->where('scheduled_at < ?', date('Y-m-d H:i:s',time()))
-            ->group('job_code');
+            ->group('job_code')
+            ->order(new \Zend_Db_Expr("scheduled_at ASC"));
       $result = $connection->fetchAll($select);
       return $result;
     }
@@ -180,21 +196,30 @@ class Schedule extends \Magento\Framework\Model\ResourceModel\Db\AbstractDb
     }
 
     /**
-     * Set jobs to error if runtime service was termininated for running jobs
+     * Set jobs to error if runtime service was terminated for running jobs
+     * @param string|int|null $scheduleId
      *
      * @return void
      */
-    public function resetSchedule() {
+    public function resetSchedule($scheduleId = null) {
       $connection = $this->getConnection();
       $message = 'Parent Cron Process Terminated Abnormally';
-      $connection->update($this->getTable('cron_schedule'),['status' => 'error', 'messages' => $message],['status = ?' => 'running']);
-      $connection->update($this->getTable('cron_schedule'),['status' => 'missed'],['status = ?' => 'pending', 'scheduled_at < ?' => date('Y-m-d H:i:s',time())]);
+
+      /* if a scheduleId was provided, update it as having terminating abnormally; otherwise, update all running jobs*/
+      $selectRunningJobs = ['status = ?' => 'running'];
+      if (!empty($scheduleId)) {
+        $selectRunningJobs['schedule_id'] = $scheduleId;
+      }
+      $connection->update($this->getTable('cron_schedule'),['status' => 'error', 'messages' => $message],$selectRunningJobs);
+
+      $selectPendingJobs = ['status = ?' => 'pending', 'scheduled_at < ?' => date('Y-m-d H:i:s',time())];
+      $connection->update($this->getTable('cron_schedule'),['status' => 'missed'],$selectPendingJobs);
     }
 
     /**
      * Trim cron_schedule table
      *
-     * @return void
+     * @return array
      */
     public function cleanSchedule($days) {
       $connection = $this->getConnection();

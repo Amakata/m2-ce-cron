@@ -1,17 +1,23 @@
+<?php
+/**
+ * @var \MageMojo\Cron\Block\Adminhtml\Reports $block
+ * @var \Magento\Framework\Escaper $escaper
+ * @var \Magento\Framework\View\Helper\SecureHtmlRenderer $secureRenderer
+ */
+?>
 <h2>Cron Execution</h2>
-
 <?php
   date_default_timezone_set('UTC');
   /* Times are stored in UTC, converting to the locale timezone for report */
-  $utc = date("Y-m-d h:i:s A");
+  $utc = date("Y-m-d h:i:s A") ?? '';
   $timezone = $block->getLocalTimezone();
   date_default_timezone_set($timezone);
-  $local = date("Y-m-d h:i:s A");
+  $local = date("Y-m-d h:i:s A") ?? '';
   $timediff = (strtotime($utc) - strtotime($local));
-  print 'Execution times are in '.$timezone;
-  print '<br/>';
-  print '<br/>';
 ?>
+Execution times are in: <?= $timezone ?>
+<br/>
+<br/>
 <table width="100%" border="1" id="report">
 <thead>
 <tr>
@@ -49,22 +55,27 @@
       $executed = $job["executed_at"];
       $runtime = '';
     } else {
-      $executed = strtotime($job["executed_at"]);
+      $executed = strtotime((string)($job["executed_at"] ?? ''));
       $executed = date("Y-m-d h:i:s A",($executed - $timediff));
-      $runtime = strtotime($job["finished_at"]) - strtotime($job["executed_at"]) .'s';
+      $runtime = strtotime((string)($job["finished_at"] ?? '')) - strtotime((string)($job["executed_at"] ?? '')) .'s';
     }
-    //print_r($job);
-    print '<tr>';
-    print '<td style="padding: 4px;">'.$job_code.'</td>';
-    print '<td style="padding: 4px;">'.$job["running"].'</td>';
-    print '<td style="padding: 4px;">'.$job["success"].'</td>';
-    print '<td style="padding: 4px;">'.$job["pending"].'</td>';
-    print '<td style="padding: 4px;">'.$job["missed"].'</td>';
-    print '<td style="padding: 4px;">'.$job["error"].'</td>';
-    print '<td style="padding: 4px;">'.$executed.'</td>';
-    print '<td style="padding: 4px;">'.$runtime.'</td>';
-    print '<td style="padding: 4px;"><a href="'.$block->getUrl("magemojocron/reports/execute",array("jobcode" => $job_code)).'">Execute</a></td>';
-    print '</tr>';
+    ?>
+    <tr>
+        <td style="padding: 4px;"><?= $block->escapeHtml($job_code) ?></td>
+        <td style="padding: 4px;"><?= $block->escapeHtml($job['running'] ?? 'N/A') ?></td>
+        <td style="padding: 4px;"><?= $block->escapeHtml($job['success'] ?? 'N/A') ?></td>
+        <td style="padding: 4px;"><?= $block->escapeHtml($job['pending'] ?? 'N/A') ?></td>
+        <td style="padding: 4px;"><?= $block->escapeHtml($job['missed'] ?? 'N/A') ?></td>
+        <td style="padding: 4px;"><?= $block->escapeHtml($job['error'] ?? 'N/A') ?></td>
+        <td style="padding: 4px;"><?= $block->escapeHtml($executed) ?></td>
+        <td style="padding: 4px;"><?= $block->escapeHtml($runtime) ?></td>
+        <td style="padding: 4px;">
+            <a href=" <?= $block->escapeUrl($block->getUrl('magemojocron/reports/execute', ['jobcode' => $job_code])) ?>">
+                <?= __('Execute') ?>
+            </a>
+        </td>
+    </tr>
+    <?php
   }
 
 ?>
@@ -83,13 +94,12 @@
 <tbody>
 <?php
 $errors = $block->getErrorReport();
-foreach($errors as $error) {
-  print '<tr>';
-  print '<td style="padding: 4px;">'.$error["job_code"].'</td>';
-  print '<td style="padding: 4px;">'.$error["messages"].'</td>';
-  print '</tr>';
-}
-?>
+foreach($errors as $error): ?>
+    <tr>
+      <td style="padding: 4px;"><?= $block->escapeHtml($error['job_code']) ?></td>
+      <td style="padding: 4px;"><?= $block->escapeHtml($error['messages']) ?></td>
+    </tr>
+<?php endforeach; ?>
 
 </tbody>
 </table>
