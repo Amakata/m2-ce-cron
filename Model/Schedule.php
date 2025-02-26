@@ -841,7 +841,7 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
       #Check for repeating strings indicating an infinately looping processes
       $checks = array(
         $this->consumersCheck($tail,'SELECT `queue_message`.`top"',1),
-        $this->consumersCheck($tail,'rt_sigsuspend([]',0)
+        $this->consumersCheck($tail,'rt_sigsuspend([]',1)
       );
       if (in_array(True,$checks)) {
         $this->consumersTerminate($pid);
