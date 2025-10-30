@@ -773,7 +773,7 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
         }
 
         #Take a break
-        sleep(5);
+        sleep(2);
       }
     }
 
