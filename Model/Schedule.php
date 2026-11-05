@@ -151,8 +151,8 @@ class Schedule extends \Magento\Framework\DataObject implements \Magento\Framewo
         \Magento\Framework\ObjectManagerInterface $objectManager,
         \Magento\Framework\Process\PhpExecutableFinderFactory $phpExecutableFinderFactory,
         \Magento\Store\Model\App\Emulation $appEmulation,
-        \Magento\Framework\App\AreaList $areaList = null,
-        ConnectionTypeResolver $mqConnectionTypeResolver = null,
+        ?\Magento\Framework\App\AreaList $areaList = null,
+        ?ConnectionTypeResolver $mqConnectionTypeResolver = null,
         array $data = []
     ) {
         $this->cronconfig = $cronconfig;
